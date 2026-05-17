@@ -1,0 +1,19 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+# Edge function for AI proxy
+[[edge_functions]]
+  function = "ai-proxy"
+  path = "/api/ai"
+
+# SPA fallback — all non-API routes serve index.html
+[[redirects]]
+  from = "/api/*"
+  to = "/api/:splat"
+  status = 200
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
