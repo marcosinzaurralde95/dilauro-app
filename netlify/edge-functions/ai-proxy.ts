@@ -6,6 +6,7 @@
  * ✅ Validation: body, roles, max_tokens
  * ✅ Rate limiting: in-memory per-IP (resets on cold start)
  * ✅ Multi-provider: OpenRouter (free models) with Anthropic-compatible output
+ * ✅ Fallback chain: tries multiple free models if primary fails
  *
  * Environment variables (set in Netlify dashboard):
  *   OPENROUTER_API_KEY — your OpenRouter API key (openrouter.ai/keys)
@@ -13,7 +14,15 @@
  */
 
 const OPENROUTER_API = "https://openrouter.ai/api/v1/chat/completions";
-const DEFAULT_MODEL = "deepseek/deepseek-chat:free";
+
+// Model fallback chain — tried in order until one succeeds
+const MODEL_CHAIN = [
+  "deepseek/deepseek-v4-flash:free",
+  "openai/gpt-oss-120b:free",
+  "nvidia/nemotron-3-super-120b-a12b:free",
+  "meta-llama/llama-3.3-70b-instruct:free",
+  "google/gemma-4-31b-it:free",
+];
 
 // Simple in-memory rate limiting
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
@@ -68,7 +77,7 @@ function openaiToAnthropicResponse(openaiData: Record<string, unknown>): Record<
     type: "message",
     role: "assistant",
     content: [{ type: "text", text: textContent }],
-    model: openaiData.model || DEFAULT_MODEL,
+    model: openaiData.model || MODEL_CHAIN[0],
     stop_reason: choices[0]?.finish_reason === "stop" ? "end_turn" : choices[0]?.finish_reason || "end_turn",
     usage: openaiData.usage || { input_tokens: 0, output_tokens: 0 },
   };
@@ -109,14 +118,43 @@ function transformStreamToAnthropic(openaiStream: ReadableStream<Uint8Array>): R
         buffer = lines.pop() || "";
 
         for (const line of lines) {
+          // Skip SSE comments (e.g. ": OPENROUTER PROCESSING")
           if (!line.startsWith("data: ")) continue;
           const data = line.slice(6).trim();
           if (data === "[DONE]") continue;
 
           try {
             const event = JSON.parse(data);
+
+            // Check for mid-stream errors from OpenRouter
+            if (event.error) {
+              const errMsg = event.error?.message || "Error del proveedor de IA";
+              if (!blockStarted) {
+                blockStarted = true;
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({
+                      type: "content_block_start",
+                      index: 0,
+                      content_block: { type: "text", text: "" },
+                    })}\n\n`
+                  )
+                );
+              }
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    type: "content_block_delta",
+                    index: 0,
+                    delta: { type: "text_delta", text: `⚠️ ${errMsg}` },
+                  })}\n\n`
+                )
+              );
+              continue;
+            }
+
             const choices = (event.choices || []) as Array<{
-              delta?: { content?: string; role?: string };
+              delta?: { content?: string; role?: string; reasoning?: string };
               finish_reason?: string | null;
             }>;
 
@@ -124,8 +162,11 @@ function transformStreamToAnthropic(openaiStream: ReadableStream<Uint8Array>): R
 
             const delta = choices[0]?.delta;
 
+            // Get actual content text (skip reasoning tokens — those are internal thinking)
+            const contentText = delta?.content || "";
+
             // Send content_block_start on first content delta
-            if (delta?.content && !blockStarted) {
+            if (contentText && !blockStarted) {
               blockStarted = true;
               controller.enqueue(
                 encoder.encode(
@@ -139,13 +180,13 @@ function transformStreamToAnthropic(openaiStream: ReadableStream<Uint8Array>): R
             }
 
             // Send content delta
-            if (delta?.content) {
+            if (contentText) {
               controller.enqueue(
                 encoder.encode(
                   `data: ${JSON.stringify({
                     type: "content_block_delta",
                     index: 0,
-                    delta: { type: "text_delta", text: delta.content },
+                    delta: { type: "text_delta", text: contentText },
                   })}\n\n`
                 )
               );
@@ -161,6 +202,38 @@ function transformStreamToAnthropic(openaiStream: ReadableStream<Uint8Array>): R
       reader.cancel();
     },
   });
+}
+
+/**
+ * Make a request to OpenRouter with a specific model.
+ * Returns the Response object if successful (2xx), null if model fails.
+ */
+async function tryModel(
+  model: string,
+  apiKey: string,
+  payload: Record<string, unknown>
+): Promise<Response | null> {
+  try {
+    const res = await fetch(OPENROUTER_API, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+        "HTTP-Referer": "https://dilauro-app.netlify.app",
+        "X-Title": "AION AI Business OS",
+      },
+      body: JSON.stringify({ ...payload, model }),
+    });
+
+    // If the model is not found or rate limited, try next
+    if (res.status === 404 || res.status === 429 || res.status === 503) {
+      return null;
+    }
+
+    return res;
+  } catch {
+    return null;
+  }
 }
 
 export default async function handler(request: Request) {
@@ -234,41 +307,51 @@ export default async function handler(request: Request) {
   const isStreaming = body.stream === true;
 
   // Build OpenRouter payload (OpenAI-compatible format)
-  // Prepend system message to messages array
   const messages: Array<{ role: string; content: string }> = [];
   if (body.system) {
     messages.push({ role: "system", content: body.system });
   }
   messages.push(...body.messages);
 
-  const openrouterPayload: Record<string, unknown> = {
-    model: DEFAULT_MODEL,
+  const basePayload: Record<string, unknown> = {
     max_tokens: Math.min(body.max_tokens || 3000, 8192),
     messages,
     ...(isStreaming ? { stream: true } : {}),
   };
 
-  try {
-    const apiRes = await fetch(OPENROUTER_API, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-        "HTTP-Referer": "https://dilauro-app.netlify.app",
-        "X-Title": "AION AI Business OS",
-      },
-      body: JSON.stringify(openrouterPayload),
-    });
+  // Try each model in the fallback chain
+  let apiRes: Response | null = null;
+  let usedModel = MODEL_CHAIN[0];
 
-    if (!apiRes.ok && !isStreaming) {
-      const errBody = await apiRes.text();
-      return new Response(
-        JSON.stringify({ error: `Error del proveedor de IA (${apiRes.status})`, detail: errBody }),
-        { status: apiRes.status, headers: { ...corsHeaders(), "Content-Type": "application/json" } }
-      );
+  for (const model of MODEL_CHAIN) {
+    apiRes = await tryModel(model, apiKey, basePayload);
+    if (apiRes) {
+      usedModel = model;
+      break;
     }
+  }
 
+  if (!apiRes) {
+    return new Response(
+      JSON.stringify({
+        error: "Todos los modelos gratuitos están temporalmente no disponibles. Intenta de nuevo en unos minutos.",
+        tried: MODEL_CHAIN,
+      }),
+      { status: 503, headers: { ...corsHeaders(), "Content-Type": "application/json" } }
+    );
+  }
+
+  try {
     if (isStreaming) {
+      // Check for error responses before streaming
+      if (!apiRes.ok) {
+        const errBody = await apiRes.text();
+        return new Response(
+          JSON.stringify({ error: `Error del proveedor de IA (${apiRes.status})`, detail: errBody, model: usedModel }),
+          { status: apiRes.status, headers: { ...corsHeaders(), "Content-Type": "application/json" } }
+        );
+      }
+
       if (!apiRes.body) {
         return new Response(
           JSON.stringify({ error: "Streaming no disponible." }),
@@ -285,17 +368,26 @@ export default async function handler(request: Request) {
           ...corsHeaders(),
           "Content-Type": "text/event-stream",
           "Cache-Control": "no-cache",
+          "X-AION-Model": usedModel,
         },
       });
     }
 
-    // Non-streaming: convert OpenAI response → Anthropic format
+    // Non-streaming
+    if (!apiRes.ok) {
+      const errBody = await apiRes.text();
+      return new Response(
+        JSON.stringify({ error: `Error del proveedor de IA (${apiRes.status})`, detail: errBody, model: usedModel }),
+        { status: apiRes.status, headers: { ...corsHeaders(), "Content-Type": "application/json" } }
+      );
+    }
+
     const data = await apiRes.json();
     const anthropicResponse = openaiToAnthropicResponse(data);
 
     return new Response(JSON.stringify(anthropicResponse), {
       status: 200,
-      headers: { ...corsHeaders(), "Content-Type": "application/json" },
+      headers: { ...corsHeaders(), "Content-Type": "application/json", "X-AION-Model": usedModel },
     });
   } catch (err) {
     return new Response(
