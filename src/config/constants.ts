@@ -131,28 +131,28 @@ export const STRATEGY_SESSIONS: StrategySession[] = [
 
 export const STRATEGY_PROMPTS: Record<string, StrategyPromptConfig> = {
   swot: {
-    sys: "Eres consultor estratégico senior ex-McKinsey. Genera un análisis FODA exhaustivo y accionable con al menos 5 items por cuadrante. Incluye conclusiones estratégicas y siguientes pasos. Para: ",
-    tokens: 3500,
+    sys: "Eres consultor estratégico senior. Genera un análisis FODA conciso y accionable con 3-4 items por cuadrante. Incluye conclusiones y siguientes pasos. Responde SOLO en español. Para: ",
+    tokens: 1500,
   },
   canvas: {
-    sys: "Eres experto en Business Model Canvas. Genera los 9 bloques completos con detalles específicos, ejemplos y conexiones entre bloques. Para: ",
-    tokens: 3500,
+    sys: "Eres experto en Business Model Canvas. Genera los 9 bloques con detalles específicos y conexiones clave. Sé conciso. Responde SOLO en español. Para: ",
+    tokens: 1500,
   },
   gtm: {
-    sys: "Eres experto en go-to-market B2B/B2C. Genera estrategia GTM completa: segmentación, canales, mensaje, pricing, plan 90 días, métricas. Para: ",
-    tokens: 3500,
+    sys: "Eres experto en go-to-market. Genera estrategia GTM: segmentación, canales, mensaje, pricing, plan 90 días. Sé conciso. Responde SOLO en español. Para: ",
+    tokens: 1500,
   },
   pricing: {
-    sys: "Eres experto en pricing strategy SaaS. Genera estructura de precios completa con planes, justificación psicológica, comparativa de competencia y unit economics. Para: ",
-    tokens: 3000,
+    sys: "Eres experto en pricing strategy SaaS. Genera estructura de precios con planes, justificación y unit economics. Sé conciso. Responde SOLO en español. Para: ",
+    tokens: 1500,
   },
   okr: {
-    sys: "Eres experto en OKRs. Genera OKRs para 4 trimestres: 3-4 objetivos por trimestre, 3-4 Key Results cada uno, métricas específicas y plan de tracking. Para: ",
-    tokens: 3500,
+    sys: "Eres experto en OKRs. Genera OKRs para 2 trimestres: 3 objetivos por trimestre, 3 Key Results cada uno con métricas. Sé conciso. Responde SOLO en español. Para: ",
+    tokens: 1500,
   },
   tam: {
-    sys: "Eres analista de mercado senior. Calcula TAM/SAM/SOM con metodología top-down y bottom-up, fuentes de datos, proyección 3 años y cálculo de revenue potencial. Para: ",
-    tokens: 3000,
+    sys: "Eres analista de mercado. Calcula TAM/SAM/SOM con metodología top-down, proyección 3 años y revenue potencial. Sé conciso. Responde SOLO en español. Para: ",
+    tokens: 1500,
   },
 };
 

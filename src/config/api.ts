@@ -5,17 +5,22 @@
 // ✅ Real streaming via SSE (Anthropic-format events)
 // ✅ Auth token sent in every request
 // ✅ All calls use streaming to avoid edge function timeouts
+// ✅ 90-second timeout to prevent infinite hangs
 // ─────────────────────────────────────────────────────────────
 import type { ChatMessage, MCPIntegration } from "../types";
 import { PROXY_URL, APP_TOKEN } from "./constants";
 
+const STREAM_TIMEOUT_MS = 90_000; // 90 seconds max for any AI call
+
 /**
  * Internal helper: reads an SSE stream and collects all text deltas.
  * Used by both callAI (buffered) and callAIStream (real-time).
+ * Includes a timeout to prevent infinite hangs.
  */
 async function readStream(
   res: Response,
-  onDelta?: (fullText: string) => void
+  onDelta?: (fullText: string) => void,
+  signal?: AbortSignal
 ): Promise<string> {
   const reader = res.body?.getReader();
   if (!reader) throw new Error("Streaming no soportado en este navegador.");
@@ -24,39 +29,59 @@ async function readStream(
   let fullText = "";
   let buffer = "";
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  try {
+    while (true) {
+      // Race between next chunk and timeout
+      const readPromise = reader.read();
+      const { done, value } = await readPromise;
+      if (done) break;
 
-    buffer += decoder.decode(value, { stream: true });
+      // Check abort signal
+      if (signal?.aborted) {
+        reader.cancel();
+        break;
+      }
 
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
+      buffer += decoder.decode(value, { stream: true });
 
-    for (const line of lines) {
-      if (!line.startsWith("data: ")) continue;
-      const data = line.slice(6).trim();
-      if (data === "[DONE]") continue;
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
 
-      try {
-        const event = JSON.parse(data);
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const data = line.slice(6).trim();
+        if (data === "[DONE]") continue;
 
-        if (event.type === "content_block_delta") {
-          const delta = event.delta?.text || "";
-          if (delta) {
-            fullText += delta;
-            if (onDelta) onDelta(fullText);
+        try {
+          const event = JSON.parse(data);
+
+          if (event.type === "content_block_delta") {
+            const delta = event.delta?.text || "";
+            if (delta) {
+              fullText += delta;
+              if (onDelta) onDelta(fullText);
+            }
           }
-        }
 
-        if (event.type === "error") {
-          throw new Error(event.error?.message || "Error en stream");
+          // Stop early on message_stop
+          if (event.type === "message_stop") {
+            reader.cancel();
+            return fullText;
+          }
+
+          if (event.type === "error") {
+            throw new Error(event.error?.message || "Error en stream");
+          }
+        } catch (e) {
+          if (e instanceof SyntaxError) continue;
+          throw e;
         }
-      } catch (e) {
-        if (e instanceof SyntaxError) continue;
-        throw e;
       }
     }
+  } catch (e) {
+    // If we got some text before the error, return it
+    if (fullText && (e as Error).name === "AbortError") return fullText;
+    throw e;
   }
 
   return fullText;
@@ -82,25 +107,39 @@ export async function callAI(
   };
   if (mcpServers.length) body.mcp_servers = mcpServers;
 
-  const res = await fetch(PROXY_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(APP_TOKEN ? { Authorization: `Bearer ${APP_TOKEN}` } : {}),
-    },
-    body: JSON.stringify(body),
-  });
+  // Create abort controller with timeout
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), STREAM_TIMEOUT_MS);
 
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(
-      (err as { error?: string })?.error ||
-        `Error ${res.status}: ${res.statusText}`
-    );
+  try {
+    const res = await fetch(PROXY_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(APP_TOKEN ? { Authorization: `Bearer ${APP_TOKEN}` } : {}),
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(
+        (err as { error?: string })?.error ||
+          `Error ${res.status}: ${res.statusText}`
+      );
+    }
+
+    const text = await readStream(res, undefined, controller.signal);
+    return text || "✓ Acción completada.";
+  } catch (e) {
+    if ((e as Error).name === "AbortError") {
+      throw new Error("La respuesta tardó demasiado. Intenta con una consulta más corta.");
+    }
+    throw e;
+  } finally {
+    clearTimeout(timeout);
   }
-
-  const text = await readStream(res);
-  return text || "✓ Acción completada.";
 }
 
 /**
@@ -121,24 +160,40 @@ export async function callAIStream(
     stream: true,
   };
 
-  const res = await fetch(PROXY_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(APP_TOKEN ? { Authorization: `Bearer ${APP_TOKEN}` } : {}),
-    },
-    body: JSON.stringify(body),
-    signal,
-  });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(
-      (err as { error?: string })?.error ||
-        `Error ${res.status}: ${res.statusText}`
-    );
+  // Wrap user signal with timeout
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), STREAM_TIMEOUT_MS);
+  if (signal) {
+    signal.addEventListener("abort", () => controller.abort());
   }
 
-  const text = await readStream(res, onDelta);
-  return text || "✓ Respuesta vacía.";
+  try {
+    const res = await fetch(PROXY_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(APP_TOKEN ? { Authorization: `Bearer ${APP_TOKEN}` } : {}),
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(
+        (err as { error?: string })?.error ||
+          `Error ${res.status}: ${res.statusText}`
+      );
+    }
+
+    const text = await readStream(res, onDelta, controller.signal);
+    return text || "✓ Respuesta vacía.";
+  } catch (e) {
+    if ((e as Error).name === "AbortError" && !signal?.aborted) {
+      throw new Error("La respuesta tardó demasiado. Intenta de nuevo.");
+    }
+    throw e;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
