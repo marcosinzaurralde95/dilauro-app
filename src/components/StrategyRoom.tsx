@@ -72,7 +72,7 @@ export function StrategyRoom({ addToast }: StrategyRoomProps) {
         ♟️ Strategy Room
       </h1>
       <p style={{ color: T.muted, margin: "0 0 20px", fontSize: "11px" }}>
-        Sesiones de estrategia profunda. Respuestas hasta 3,500 tokens.
+        Sesiones de estrategia profunda con IA.
       </p>
 
       {/* Session selector */}

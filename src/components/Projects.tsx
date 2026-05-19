@@ -28,21 +28,20 @@ export function Projects({ projects, saveProjects, addToast }: ProjectsProps) {
     if (!form.name.trim() || loading) return;
     setLoading(true);
     try {
-      const sys = `Genera un roadmap en JSON válido y completo. Sin markdown, sin texto extra.
-Estructura exacta:
-{"summary":"descripción del proyecto en 2-3 líneas","phases":[{"name":"nombre fase","duration":"X semanas","tasks":["tarea 1","tarea 2","tarea 3"]}],"kpis":["kpi1","kpi2","kpi3"],"risks":["riesgo1","riesgo2"],"stack":["tech1","tech2","tech3"]}
-Genera 4 fases, 3-4 tareas por fase, 4 KPIs, 3 riesgos, 5 techs.`;
+      const sys = `Responde SOLO con JSON válido. Sin markdown, sin texto extra, sin backticks.
+Estructura: {"summary":"resumen 2 líneas","phases":[{"name":"fase","duration":"X sem","tasks":["t1","t2","t3"]}],"kpis":["kpi1","kpi2","kpi3"],"risks":["riesgo1","riesgo2"],"stack":["tech1","tech2"]}
+3 fases, 3 tareas c/u, 3 KPIs, 2 riesgos, 4 techs. Responde en español.`;
 
       const raw = await callAI(
         [
           {
             role: "user",
-            content: `Proyecto: ${form.name} | Tipo: ${form.type} | Descripción: ${form.description}`,
+            content: `Proyecto: ${form.name} | Tipo: ${form.type} | ${form.description}`,
           },
         ],
         sys,
         [],
-        2500
+        1500
       );
 
       let roadmap: Roadmap;
