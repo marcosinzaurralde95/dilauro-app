@@ -5,7 +5,7 @@ import { useState } from "react";
 import type { StrategySession } from "../types";
 import { STRATEGY_SESSIONS, STRATEGY_PROMPTS } from "../config/constants";
 import { callAI } from "../config/api";
-import { storage } from "../hooks/useStorage";
+import { saveUserData } from "../hooks/useStorage";
 import { T, glass, btn, inp } from "../config/theme";
 
 interface StrategyRoomProps {
@@ -42,11 +42,11 @@ export function StrategyRoom({ addToast }: StrategyRoomProps) {
     setLoading(false);
   };
 
-  const saveResult = () => {
+  const saveResult = async () => {
     if (!sel) return;
     try {
       const key = `strat_${sel.id}_${Date.now()}`;
-      storage.set(key, {
+      await saveUserData(key, {
         session: sel.label,
         context: ctx,
         result,
